@@ -1,0 +1,13 @@
+version: '3'
+services:
+  mariadb:
+    environment:
+      MYSQL_ROOT_PASSWORD: MarzbotRoot2026!
+      MYSQL_DATABASE: marzbot
+      MYSQL_USER: marzbot
+      MYSQL_PASSWORD: Marzbot2026!
+  phpmyadmin:
+    ports:
+      - "127.0.0.1:8010:80"
+    environment:
+      - PMA_HOST=mariadb

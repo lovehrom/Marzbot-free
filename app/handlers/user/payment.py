@@ -1,5 +1,5 @@
 import uuid
-
+import config
 from aiogram import F
 from aiogram.filters import StateFilter
 from aiogram.fsm.context import FSMContext
@@ -7,20 +7,16 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import CallbackQuery, Message, ReplyKeyboardRemove
 from tortoise.transactions import in_transaction
 
-import config
 from app.keyboards.base import CancelUserForm, MainMenu
 from app.keyboards.user.account import UserPanel, UserPanelAction
 from app.keyboards.user.payment import (
     ChargeMethods,
     ChargePanel,
-    PayCryptoUrl,
     SelectPayAmount,
+    PayYooUrl,
 )
-from app.models.user import CryptoPayment, Transaction, User
+from app.models.user import Transaction, User, YookassaPayment
 from app.utils.filters import IsJoinedToChannel
-from app.utils.settings import Settings
-from payment_clients.nobitex import CouldNotGetUSDTPrice, NobitexMarketAPI
-from payment_clients.nowpayments import NowPaymentsAPI, NowPaymentsError
 
 from . import router
 
@@ -34,90 +30,41 @@ class SelectCustomAmountForm(StatesGroup):
     (F.text == MainMenu.back) | (F.text == MainMenu.cancel),
     StateFilter(SelectCustomAmountForm),
 )
+async def cancel_payment(message: Message, state: FSMContext):
+    await state.clear()
+    await message.answer("Операция отменена.", reply_markup=ReplyKeyboardRemove())
+
+
 @router.message(F.text == MainMenu.charge, IsJoinedToChannel())
 @router.callback_query(UserPanel.Callback.filter(F.action == UserPanelAction.charge))
 async def charge(qmsg: Message | CallbackQuery, user: User, state: FSMContext = None):
     if (state is not None) and (await state.get_state() is not None):
-        text = "🌀 عملیات لغو شد!"
         await state.clear()
-        if isinstance(qmsg, CallbackQuery):
-            await qmsg.answer(text)
-        else:
-            await qmsg.answer(text=text, reply_markup=ReplyKeyboardRemove())
-    settings = await Settings.payment_settings()
-    if not any([True for v in settings.values() if v]):
-        text = """
-در حال حاضر درگاه پرداخت غیرفعال می‌باشد! برای شارژ حساب با مدیر سیستم تماس بگیرید.
-"""
-        if isinstance(qmsg, Message):
-            return await qmsg.answer(text)
-        return await qmsg.message.edit_text(text)
-    else:
-        text = """
-    ♻️ شما میتونید به روش‌های مختلفی حسابتون رو شارژ کنید🙄
-
-    ✔️ حداقل میزان پرداختی برای شارژ حساب 20,000 تومان می‌باشد
-
-    برای ادامه مراحل شارژ حساب، یکی از روش‌های پرداخت زیر رو انتخاب کنید👇
-        """
-        if isinstance(qmsg, Message):
-            return await qmsg.answer(
-                text, reply_markup=ChargePanel(settings).as_markup()
-            )
-        return await qmsg.message.edit_text(
-            text, reply_markup=ChargePanel(settings).as_markup()
-        )
+    text = (
+        "Пополнение баланса\n\n"
+        "Минимальная сумма пополнения: 100 руб.\n"
+        "Выберите удобный способ оплаты или введите сумму вручную."
+    )
+    if isinstance(qmsg, Message):
+        return await qmsg.answer(text, reply_markup=ChargePanel({}).as_markup())
+    return await qmsg.message.edit_text(text, reply_markup=ChargePanel({}).as_markup())
 
 
-@router.callback_query(ChargePanel.Callback.filter(F.method == ChargeMethods.crypto))
-async def crypto_select_amount(query: CallbackQuery, user: User):
-    try:
-        if not await Settings.payment_crypto() or not await NowPaymentsAPI.status():
-            return await query.answer(
-                "📍 درحال حاضر امکان پرداخت ارز دیجیتال وجود ندارد! لطفا با پشتیبانی تماس بگیرید.",
-                show_alert=True,
-            )
-    except NowPaymentsError as exc:
-        await query.answer(
-            "📍 درحال حاضر امکان پرداخت ارز دیجیتال وجود ندارد! لطفا با پشتیبانی تماس بگیرید.",
-            show_alert=True,
-        )
-        raise exc
-
-    # fmt: off
-    text = f"""
-✔️ شما در حال افزایش اعتبار با ارز دیجیتال هستید!
-
-❗️اگر اشتباه وارد این بخش شدید دکمه «برگشت» را کلیک کنید
-{config.CRYPTO_PAYMENT_HELP}
-{config.FREE_CREDIT_ON_TEXT}
-
-✔️ برای ادامه، مبلغ مورد نظر برای افزایش اعتبار رو انتخاب کنید:
-‌‌
-    """
-    # fmt: on
+@router.callback_query(ChargePanel.Callback.filter(F.method == ChargeMethods.yookassa))
+async def yookassa_select_amount(query: CallbackQuery, user: User):
+    text = "Выберите сумму для зачисления:"
     await query.message.edit_text(
-        text, reply_markup=SelectPayAmount(method=ChargeMethods.crypto).as_markup()
+        text, reply_markup=SelectPayAmount(method=ChargeMethods.yookassa).as_markup()
     )
 
 
 @router.callback_query(SelectPayAmount.Callback.filter(F.amount == 0))
-async def enter_custom_amount(
-    query: CallbackQuery,
-    user: User,
-    callback_data: SelectPayAmount.Callback,
-    state: FSMContext,
-):
-    text = """
-💴 مبلغ مورد نظر برای افزایش اعتبار را وارد کنید:
-"""
+async def enter_custom_amount(query: CallbackQuery, user: User, callback_data: SelectPayAmount.Callback, state: FSMContext):
     await state.set_state(SelectCustomAmountForm.amount)
     await state.set_data({"method": callback_data.method})
     await query.message.answer(
-        text,
-        reply_markup=CancelUserForm(cancel=True).as_markup(
-            resize_keyboard=True, one_time_keyboard=True
-        ),
+        "Введите сумму (только число, в рублях):",
+        reply_markup=CancelUserForm(cancel=True).as_markup(resize_keyboard=True)
     )
 
 
@@ -126,102 +73,125 @@ async def get_custom_amount(message: Message, user: User, state: FSMContext):
     try:
         amount = int(message.text)
     except ValueError:
-        return await message.reply("❌ لطفا مقداری عددی وارد کنید:")
-
-    if amount < 20000:
-        return await message.reply(f"❌ لطفا مقداری بیشتر از 20000 وارد کنید:")
-
-    method = (await state.get_data()).get("method")
-    free = (
-        0
-        if (not config.PAYMENTS_DISCOUNT_ON) or (amount < config.PAYMENTS_DISCOUNT_ON)
-        else amount * (config.PAYMENTS_DISCOUNT_ON_PERCENT / 100)
-    )
-    callback_data = SelectPayAmount.Callback(amount=amount, free=free, method=method)
-    if method == ChargeMethods.crypto:
-        return await crypto_select_amount(message, user, callback_data=callback_data)
+        return await message.reply("Пожалуйста, введите числовое значение.")
+    if amount < 100:
+        return await message.reply("Минимальная сумма пополнения - 100 руб.")
+    data = await state.get_data()
+    method = data.get("method")
+    await state.clear()
+    callback_data = SelectPayAmount.Callback(amount=amount, free=0, method=method)
+    return await yookassa_pay_logic(message, user, callback_data)
 
 
-@router.callback_query(
-    SelectPayAmount.Callback.filter(F.method == ChargeMethods.crypto)
-)
-async def crypto_select_amount(
-    qmsg: CallbackQuery | Message, user: User, callback_data: SelectPayAmount.Callback
-):
-    if not await Settings.payment_crypto():
-        if isinstance(qmsg, CallbackQuery):
-            return await qmsg.answer(
-                "📍 درحال حاضر امکان پرداخت ارز دیجیتال وجود ندارد! لطفا با پشتیبانی تماس بگیرید.",
-                show_alert=True,
-            )
-        return await qmsg.answer(
-            "📍 درحال حاضر امکان پرداخت ارز دیجیتال وجود ندارد! لطفا با پشتیبانی تماس بگیرید.",
-            show_alert=True,
-        )
+@router.callback_query(SelectPayAmount.Callback.filter(F.method == ChargeMethods.yookassa))
+async def yookassa_pay_logic(qmsg: CallbackQuery | Message, user: User, callback_data: SelectPayAmount.Callback):
     try:
+        from payment_clients.yookassa import YooKassaClient
+
+        yookassa = YooKassaClient(
+            shop_id=config.YOOKASSA_SHOP_ID,
+            secret_key=config.YOOKASSA_SECRET_KEY,
+            is_test=config.IS_TEST,
+        )
+
         async with in_transaction():
-            usdt_rate = await NobitexMarketAPI.get_price()
             transaction = await Transaction.create(
-                type=Transaction.PaymentType.crypto,
-                status=Transaction.Status.waiting,
-                amount=callback_data.amount + callback_data.free,
-                amount_free_given=callback_data.free,
                 user=user,
+                amount=callback_data.amount,
+                type=Transaction.PaymentType.yookassa,
+                status=Transaction.Status.waiting,
             )
-            invoice = await NowPaymentsAPI.create_invoice(
-                price_amount=round(callback_data.amount / usdt_rate, 3),
-                order_id=transaction.id,
+            bot_link = f"https://t.me/{config.BOT_USERNAME}"
+            payment = await yookassa.create_payment(
+                amount_rub=callback_data.amount,
+                description=f"Пополнение баланса — заказ #{transaction.id}",
+                return_url=bot_link,
+                metadata={"transaction_id": str(transaction.id)},
             )
-            await CryptoPayment.create(
+            payment_id = payment.get("id", "")
+            confirmation_url = ""
+            if payment.get("confirmation"):
+                confirmation_url = payment["confirmation"].get("confirmation_url", "")
+            status = payment.get("status", "")
+
+            yookassa_record = await YookassaPayment.create(
                 transaction=transaction,
-                usdt_rate=usdt_rate,
-                invoice_id=invoice.id,
-                order_id=invoice.order_id,
-                price_amount=invoice.price_amount,
-                price_currency=invoice.price_currency,
-                nowpm_created_at=invoice.created_at,
-                nowpm_updated_at=invoice.updated_at,
+                yookassa_payment_id=payment_id,
             )
-        text = f"""
-✅ فاکتور افزایش اعتبار شما ساخته شد!
+            if status == "succeeded":
+                transaction.status = Transaction.Status.finished
+                transaction.amount_paid = callback_data.amount
+                await transaction.save()
+                yookassa_record.status = "succeeded"
+                await yookassa_record.save()
 
-💳 شماره فاکتور: {transaction.id}
-💲مبلغ قابل پرداخت: <b>{transaction.amount - transaction.amount_free_given:,}</b> تومان (<b>{invoice.price_amount}</b> دلار)
-~~~~~~~~~~~~~~~~~~~~~~~~
-🔵 تأیید پرداخت به صورت کاملاً خودکار انجام می‌شود. بعد از پرداخت و تأیید تراکنش در بلاکچین، مبلغ مورد نظر به حساب شما اضافه می‌شود!
-
-⚠️ فاکتور پرداخت شما تا ۲ ساعت دیگر معتبر می‌باشد.
-
-🟩 برای پرداخت روی دکمه زیر کلیک کنید:
-‌‌
-"""
+        text = (
+            f"Счёт успешно сформирован!\n\n"
+            f"Сумма к оплате: {callback_data.amount:,} руб.\n"
+            f"Номер заказа: {transaction.id}\n\n"
+            f"Нажмите кнопку ниже для перехода на страницу оплаты."
+        )
         if isinstance(qmsg, CallbackQuery):
             return await qmsg.message.edit_text(
-                text=text,
-                reply_markup=PayCryptoUrl(url=invoice.invoice_url).as_markup(),
+                text,
+                reply_markup=PayYooUrl(url=confirmation_url, inv_id=transaction.id).as_markup(),
             )
         return await qmsg.answer(
-            text=text, reply_markup=PayCryptoUrl(url=invoice.invoice_url).as_markup()
+            text,
+            reply_markup=PayYooUrl(url=confirmation_url, inv_id=transaction.id).as_markup(),
         )
-    except NowPaymentsError as err:
+    except Exception as e:
+        from app.logger import get_logger
+        get_logger("payment").error(f"CRITICAL PAYMENT ERROR: {e}")
+        error_text = "Ошибка при создании счёта. Попробуйте ещё раз."
         if isinstance(qmsg, CallbackQuery):
-            await qmsg.answer(
-                "📍 درحال حاضر امکان پرداخت ارز دیجیتال وجود ندارد! لطفا با پشتیبانی تماس بگیرید.",
-                show_alert=True,
-            )
+            await qmsg.answer(error_text, show_alert=True)
         else:
-            await qmsg.answer(
-                "📍 درحال حاضر امکان پرداخت ارز دیجیتال وجود ندارد! لطفا با پشتیبانی تماس بگیرید."
-            )
-        raise err
-    except CouldNotGetUSDTPrice as err:
-        if isinstance(qmsg, CallbackQuery):
-            await qmsg.answer(
-                "📍 خطایی در دریافت نرخ ارز رخ داد! لطفا با پشتیبانی تماس بگیرید.",
-                show_alert=True,
-            )
-        else:
-            await qmsg.answer(
-                "📍 خطایی در دریافت نرخ ارز رخ داد! لطفا با پشتیبانی تماس بگیرید."
-            )
-        raise err
+            await qmsg.answer(error_text)
+        raise e
+
+
+@router.callback_query(F.data.startswith("check_yoo_payment:"))
+async def check_yookassa_payment(query: CallbackQuery, user: User):
+    inv_id = int(query.data.split(":")[1])
+    transaction = await Transaction.get_or_none(id=inv_id, user=user)
+    if not transaction:
+        return await query.answer("Платёж не найден", show_alert=True)
+    if transaction.status == Transaction.Status.finished:
+        return await query.answer("Этот платёж уже обработан!", show_alert=True)
+    from datetime import datetime as dt, timedelta as td
+    if transaction.created_at < dt.utcnow() - td(hours=24):
+        transaction.status = Transaction.Status.canceled
+        await transaction.save()
+        return await query.answer("Срок действия счёта истёк. Создайте новый.", show_alert=True)
+    from payment_clients.yookassa import YooKassaClient
+    yookassa = YooKassaClient(
+        shop_id=config.YOOKASSA_SHOP_ID,
+        secret_key=config.YOOKASSA_SECRET_KEY,
+        is_test=config.IS_TEST,
+    )
+    bot_link = f"https://t.me/{config.BOT_USERNAME}"
+    payment = await yookassa.create_payment(
+        amount_rub=transaction.amount,
+        description=f"Пополнение баланса — заказ #{transaction.id}",
+        return_url=bot_link,
+        metadata={"transaction_id": str(transaction.id)},
+    )
+    confirmation_url = ""
+    if payment.get("confirmation"):
+        confirmation_url = payment["confirmation"].get("confirmation_url", "")
+    yoo_record = await YookassaPayment.get_or_none(transaction=transaction)
+    if yoo_record:
+        yoo_record.yookassa_payment_id = payment.get("id", yoo_record.yookassa_payment_id)
+        await yoo_record.save()
+    await query.answer("Ссылка обновлена!", show_alert=False)
+    text = (
+        f"Повторная ссылка на оплату\n\n"
+        f"Сумма: {transaction.amount:,} руб.\n"
+        f"Заказ: {transaction.id}\n\n"
+        f"Если оплата прошла, но баланс не обновился — подождите пару минут."
+    )
+    await query.message.edit_text(
+        text,
+        reply_markup=PayYooUrl(url=confirmation_url, inv_id=transaction.id).as_markup(),
+    )

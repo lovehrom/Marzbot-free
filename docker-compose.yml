@@ -2,7 +2,7 @@ version: '3'
 
 services:
   bot:
-    image: ghcr.io/govfvck/marzbot:latest
+    image: marzbot-free:latest
     restart: on-failure
     ports:
       - "127.0.0.1:3333:3333"

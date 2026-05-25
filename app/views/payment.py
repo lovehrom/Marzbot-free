@@ -1,89 +1,89 @@
-import hashlib
-import hmac
 import json
 from datetime import datetime as dt
-
-from aiohttp import web
-from tortoise.transactions import in_transaction
-
 import config
-from app.main import bot
-from app.models.user import CryptoPayment, Transaction
-from payment_clients.nowpayments import PaymentResponse
+from aiohttp import web
+from app.models.user import Transaction, User, YookassaPayment
+from app.logger import get_logger
 
-from . import logger
-
+logger = get_logger("yookassa_webhook")
 routes = web.RouteTableDef()
 
 
-def hmac_sign(key: str, data: dict) -> str:
-    """
-    sort the post data from nowpayments and sign it with the secret key and sha512
-    """
-    return hmac.new(
-        key.encode(),
-        json.dumps(dict(sorted(data.items())), separators=(",", ":")).encode(),
-        hashlib.sha512,
-    ).hexdigest()
+@routes.post('/yookassa/webhook')
+async def yookassa_webhook_view(request: web.Request):
+    try:
+        body = await request.text()
+        signature = request.headers.get("Content-Signature", "")
+        if signature.startswith("sha256="):
+            signature = signature[7:]
 
-
-def verify_signature(sig: str, key: str, data: dict) -> bool:
-    if sig == hmac_sign(key, data):
-        return True
-    return False
-
-
-@routes.post("/npipn/")
-async def verify_payment(request: web.Request):
-    if not request.can_read_body:
-        return
-    data = await request.json()
-    logger.info(f"got ipn from nowpayments: {data}")
-    if config.NP_IPN_SECRET_KEY:
-        nowpayments_sig = request.headers.get("x-nowpayments-sig")
-        if not verify_signature(nowpayments_sig, config.NP_IPN_SECRET_KEY, data):
-            return
-
-    payment = PaymentResponse(**data)
-    async with in_transaction():
-        transaction = (
-            await Transaction.filter(id=payment.order_id)
-            .prefetch_related("crypto_payment")
-            .first()
+        from payment_clients.yookassa import YooKassaClient
+        yookassa = YooKassaClient(
+            shop_id=config.YOOKASSA_SHOP_ID or "",
+            secret_key=config.YOOKASSA_SECRET_KEY or "",
         )
+        if not yookassa.verify_webhook_signature(body, signature):
+            logger.warning("YooKassa: invalid webhook signature")
+            return web.Response(text="bad signature", status=400)
+
+        data = json.loads(body)
+        event_type = data.get("event")
+        payment_data = data.get("object", {})
+        payment_id = payment_data.get("id", "")
+        status = payment_data.get("status", "")
+        metadata = payment_data.get("metadata", {}) or {}
+        transaction_id = metadata.get("transaction_id")
+
+        logger.info(f"YooKassa webhook: event={event_type} payment_id={payment_id} status={status} txn={transaction_id}")
+
+        if not transaction_id:
+            logger.warning("YooKassa: no transaction_id in metadata")
+            return web.json_response({"error": "no transaction_id"}, status=400)
+
+        transaction = await Transaction.get_or_none(id=int(transaction_id)).prefetch_related("user")
         if not transaction:
-            return
+            logger.warning(f"YooKassa: transaction {transaction_id} not found")
+            return web.json_response({"error": "not found"}, status=404)
 
-        if payment.payment_status == "finished" and (
-            transaction.status
-            not in [Transaction.Status.finished, Transaction.Status.partially_paid]
-        ):
+        if transaction.status == Transaction.Status.finished:
+            logger.info(f"YooKassa: transaction {transaction_id} already finished")
+            return web.json_response({"result": "ok"})
+
+        if status == "succeeded":
+            amount_value = float(payment_data.get("amount", {}).get("value", 0))
             transaction.status = Transaction.Status.finished
-            transaction.finished_at = dt.now()
-            transaction.amount_paid = (
-                transaction.crypto_payment.usdt_rate * payment.price_amount
-            )
+            transaction.amount_paid = int(amount_value)
+            transaction.finished_at = dt.utcnow()
             await transaction.save()
-            await transaction.refresh_from_db()
-            await transaction.crypto_payment.update_from_dict(
-                {
-                    "pay_currency": payment.pay_currency,
-                    "pay_amount": payment.pay_amount,
-                    "nowpm_updated_at": payment.updated_at,
-                    "payment_status": CryptoPayment.PaymentStatus.finished,
-                    "outcome_amount": payment.outcome_amount,
-                    "outcome_currency": payment.outcome_currency,
-                    "purchase_id": payment.purchase_id,
-                    "pay_address": payment.pay_address,
-                }
-            ).save()
-            text = f"""
-✅ پرداخت شما از طریق ارز دیجیتال با موفقیت تأیید شد و مبلغ <b>{transaction.amount:,}</b> تومان به حساب شما اضافه شد!
 
-💳 شماره فاکتور: <b>{transaction.id}</b>
-💴 مبلغ پرداختی: <b>{transaction.amount_paid:,}</b> تومان
-‌‌
-"""
-            await bot.send_message(transaction.user_id, text)
+            yoo_record = await YookassaPayment.get_or_none(transaction=transaction)
+            if yoo_record:
+                yoo_record.status = "succeeded"
+                yoo_record.yookassa_payment_id = payment_id
+                await yoo_record.save()
 
-    return web.Response(status=200)
+            logger.info(f"YooKassa: payment SUCCESS User {transaction.user_id}: {int(amount_value)} RUB")
+
+            try:
+                from app.main import bot
+                await bot.send_message(
+                    transaction.user_id,
+                    f"Баланс пополнен!\n\nЗачислено: {int(amount_value):,} руб.\nЗаказ: #{transaction_id}"
+                )
+            except Exception as e:
+                logger.error(f"YooKassa: telegram notify error: {e}")
+
+        elif status == "canceled":
+            transaction.status = Transaction.Status.canceled
+            await transaction.save()
+            yoo_record = await YookassaPayment.get_or_none(transaction=transaction)
+            if yoo_record:
+                yoo_record.status = "canceled"
+                await yoo_record.save()
+            logger.info(f"YooKassa: payment CANCELED transaction {transaction_id}")
+
+        return web.json_response({"result": "ok"})
+
+    except Exception as e:
+        logger.error(f"YooKassa: global webhook error: {e}")
+        return web.json_response({"error": "internal error"}, status=500)

@@ -58,7 +58,7 @@ PAYMENTS_DISCOUNT_ON_PERCENT = config(
 
 
 if PAYMENTS_DISCOUNT_ON:
-    FREE_CREDIT_ON_TEXT = f"🔥 تمامی پرداخت‌های بیشتر از {PAYMENTS_DISCOUNT_ON:,} تومان شامل {PAYMENTS_DISCOUNT_ON_PERCENT} درصد اعتبار هدیه می‌شوند😉"
+    FREE_CREDIT_ON_TEXT = f"🔥 تمامی پرداخت‌های بیشتر از {PAYMENTS_DISCOUNT_ON:,} руб. получают бонус {PAYMENTS_DISCOUNT_ON_PERCENT} درصد اعتبار هدیه می‌شوند😉"
 else:
     FREE_CREDIT_ON_TEXT = ""
 
@@ -72,6 +72,12 @@ NP_IPN_CALLBACK_URL = config(
 NP_IPN_SECRET_KEY = config("NP_IPN_SECRET_KEY", default=None)
 NP_SUCCESS_URL = config("NP_SUCCESS_URL", default=None)
 NP_CANCEL_URL = config("NP_CANCEL_URL", default=None)
+# --- YooKassa ---
+YOOKASSA_SHOP_ID = config("YOOKASSA_SHOP_ID", default="")
+YOOKASSA_SECRET_KEY = config("YOOKASSA_SECRET_KEY", default="")
+IS_TEST = config("IS_TEST", default=0, cast=int)
+# ----------------
+
 
 TORTOISE_ORM = {
     "connections": {"default": DATABASE_URL},
@@ -110,7 +116,7 @@ FORCE_JOIN_CHATS = {
 def generate_help(text: str) -> str:
     if not text:
         return ""
-    return f"~~~~~~~~~~~~~~~~~~~~~~~~{text}~~~~~~~~~~~~~~~~~~~~~~~~"
+    return f"~~~~~~~~~~~~~~~~~~~~~~~~\n{text}\n~~~~~~~~~~~~~~~~~~~~~~~~"
 
 
 _START_TEXT = f"""
